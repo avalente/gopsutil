@@ -11,7 +11,7 @@ import (
 	"strconv"
 	"strings"
 
-	common "github.com/shirou/gopsutil/common"
+	common "github.com/avalente/gopsutil/common"
 )
 
 var HELPER_PATH = filepath.Join(os.Getenv("HOME"), ".gopsutil_cpu_helper")

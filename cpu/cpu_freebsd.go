@@ -9,7 +9,7 @@ import (
 	"strconv"
 	"strings"
 
-	common "github.com/shirou/gopsutil/common"
+	common "github.com/avalente/gopsutil/common"
 )
 
 // sys/resource.h

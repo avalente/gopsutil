@@ -5,7 +5,7 @@ package docker
 import (
 	"encoding/json"
 
-	"github.com/shirou/gopsutil/cpu"
+	"github.com/avalente/gopsutil/cpu"
 )
 
 // GetDockerIDList returnes a list of DockerID.

@@ -7,7 +7,7 @@ import (
 	"strconv"
 	"strings"
 
-	common "github.com/shirou/gopsutil/common"
+	common "github.com/avalente/gopsutil/common"
 )
 
 func VirtualMemory() (*VirtualMemoryStat, error) {

@@ -12,9 +12,9 @@ import (
 	"github.com/StackExchange/wmi"
 	"github.com/shirou/w32"
 
-	common "github.com/shirou/gopsutil/common"
-	cpu "github.com/shirou/gopsutil/cpu"
-	net "github.com/shirou/gopsutil/net"
+	common "github.com/avalente/gopsutil/common"
+	cpu "github.com/avalente/gopsutil/cpu"
+	net "github.com/avalente/gopsutil/net"
 )
 
 const (
