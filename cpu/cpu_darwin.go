@@ -2,23 +2,19 @@
 
 package cpu
 
+// #include <mach/mach.h>
+// #include <mach/mach_error.h>
+import "C"
+
 import (
+	"bytes"
+	"encoding/binary"
 	"fmt"
-	"io"
-	"os"
 	"os/exec"
-	"path/filepath"
 	"strconv"
 	"strings"
-
-	common "github.com/avalente/gopsutil/common"
+	"unsafe"
 )
-
-var HELPER_PATH = filepath.Join(os.Getenv("HOME"), ".gopsutil_cpu_helper")
-
-// enable cpu helper. It may become security problem.
-// This env valiable approach will be changed.
-const HELPER_ENABLE_ENV = "ALLLOW_INSECURE_CPU_HELPER"
 
 var ClocksPerSec = float64(100)
 
@@ -31,75 +27,101 @@ func init() {
 			ClocksPerSec = float64(i)
 		}
 	}
+}
 
-	// adhoc compile on the host. Errors will be ignored.
-	// gcc is required to compile.
-	if !common.PathExists(HELPER_PATH) && os.Getenv(HELPER_ENABLE_ENV) == "yes" {
-		cmd := exec.Command("gcc", "-o", HELPER_PATH, "-x", "c", "-")
-		stdin, err := cmd.StdinPipe()
-		if err != nil {
-			return
-		}
-		io.WriteString(stdin, cpu_helper_src)
-		stdin.Close()
-		cmd.Output()
+func fillCPUStats(ticks []uint32, cpu *CPUTimesStat) {
+	cpu.User = float64(ticks[C.CPU_STATE_USER]) / ClocksPerSec
+	cpu.System = float64(ticks[C.CPU_STATE_SYSTEM]) / ClocksPerSec
+	cpu.Idle = float64(ticks[C.CPU_STATE_IDLE]) / ClocksPerSec
+	cpu.Nice = float64(ticks[C.CPU_STATE_NICE]) / ClocksPerSec
+}
+
+// stolen from https://github.com/cloudfoundry/gosigar
+func getCPUTotalTimes() (*CPUTimesStat, error) {
+	var count C.mach_msg_type_number_t = C.HOST_CPU_LOAD_INFO_COUNT
+	var cpuload C.host_cpu_load_info_data_t
+
+	status := C.host_statistics(C.host_t(C.mach_host_self()),
+		C.HOST_CPU_LOAD_INFO,
+		C.host_info_t(unsafe.Pointer(&cpuload)),
+		&count)
+
+	if status != C.KERN_SUCCESS {
+		return nil, fmt.Errorf("host_statistics error=%d", status)
 	}
+
+	cpu := CPUTimesStat{
+		CPU: "total"}
+
+	var cpu_ticks = make([]uint32, len(cpuload.cpu_ticks))
+	for i := range cpuload.cpu_ticks {
+		cpu_ticks[i] = uint32(cpuload.cpu_ticks[i])
+	}
+
+	fillCPUStats(cpu_ticks, &cpu)
+
+	return &cpu, nil
+}
+
+// stolen from https://github.com/cloudfoundry/gosigar
+func getCPUDetailedTimes() ([]CPUTimesStat, error) {
+	var count C.mach_msg_type_number_t
+	var cpuload *C.processor_cpu_load_info_data_t
+	var ncpu C.natural_t
+
+	status := C.host_processor_info(C.host_t(C.mach_host_self()),
+		C.PROCESSOR_CPU_LOAD_INFO,
+		&ncpu,
+		(*C.processor_info_array_t)(unsafe.Pointer(&cpuload)),
+		&count)
+
+	if status != C.KERN_SUCCESS {
+		return nil, fmt.Errorf("host_processor_info error=%d", status)
+	}
+
+	// jump through some cgo casting hoops and ensure we properly free
+	// the memory that cpuload points to
+	target := C.vm_map_t(C.mach_task_self_)
+	address := C.vm_address_t(uintptr(unsafe.Pointer(cpuload)))
+	defer C.vm_deallocate(target, address, C.vm_size_t(ncpu))
+
+	// the body of struct processor_cpu_load_info
+	// aka processor_cpu_load_info_data_t
+	var cpu_ticks = make([]uint32, C.CPU_STATE_MAX)
+
+	// copy the cpuload array to a []byte buffer
+	// where we can binary.Read the data
+	size := int(ncpu) * binary.Size(cpu_ticks)
+	buf := C.GoBytes(unsafe.Pointer(cpuload), C.int(size))
+
+	bbuf := bytes.NewBuffer(buf)
+
+	var ret []CPUTimesStat = make([]CPUTimesStat, 0, ncpu+1)
+
+	for i := 0; i < int(ncpu); i++ {
+		err := binary.Read(bbuf, binary.LittleEndian, &cpu_ticks)
+		if err != nil {
+			return nil, err
+		}
+
+		cpu := CPUTimesStat{
+			CPU: strconv.Itoa(i)}
+
+		fillCPUStats(cpu_ticks, &cpu)
+
+		ret = append(ret, cpu)
+	}
+
+	return ret, nil
 }
 
 func CPUTimes(percpu bool) ([]CPUTimesStat, error) {
-	var ret []CPUTimesStat
-	if !common.PathExists(HELPER_PATH) {
-		return nil, fmt.Errorf("could not get cpu time")
+	if percpu {
+		return getCPUDetailedTimes()
+	} else {
+		cpu, err := getCPUTotalTimes()
+		return []CPUTimesStat{*cpu}, err
 	}
-
-	out, err := exec.Command(HELPER_PATH).Output()
-	if err != nil {
-		return ret, err
-	}
-
-	for _, line := range strings.Split(string(out), "\n") {
-		f := strings.Split(string(line), ",")
-		if len(f) != 5 {
-			continue
-		}
-		cpu, err := strconv.ParseFloat(f[0], 64)
-		if err != nil {
-			return ret, err
-		}
-		// cpu:99 means total, so just ignore if percpu
-		if (percpu && cpu == 99) || (!percpu && cpu != 99) {
-			continue
-		}
-		user, err := strconv.ParseFloat(f[1], 64)
-		if err != nil {
-			return ret, err
-		}
-		sys, err := strconv.ParseFloat(f[2], 64)
-		if err != nil {
-			return ret, err
-		}
-		idle, err := strconv.ParseFloat(f[3], 64)
-		if err != nil {
-			return ret, err
-		}
-		nice, err := strconv.ParseFloat(f[4], 64)
-		if err != nil {
-			return ret, err
-		}
-		c := CPUTimesStat{
-			User:   float64(user / ClocksPerSec),
-			Nice:   float64(nice / ClocksPerSec),
-			System: float64(sys / ClocksPerSec),
-			Idle:   float64(idle / ClocksPerSec),
-		}
-		if !percpu {
-			c.CPU = "cpu-total"
-		} else {
-			c.CPU = fmt.Sprintf("cpu%d", uint16(cpu))
-		}
-		ret = append(ret, c)
-	}
-	return ret, nil
 }
 
 // Returns only one CPUInfoStat on FreeBSD
@@ -163,51 +185,3 @@ func CPUInfo() ([]CPUInfoStat, error) {
 
 	return append(ret, c), nil
 }
-
-const cpu_helper_src = `
-#include <mach/mach.h>
-#include <mach/mach_error.h>
-#include <stdio.h>
-
-int main() {
-  	natural_t cpuCount;
-	processor_info_array_t ia;
-	mach_msg_type_number_t ic;
-
-	kern_return_t error = host_processor_info(mach_host_self(),
-		PROCESSOR_CPU_LOAD_INFO, &cpuCount, &ia, &ic);
-	if (error) {
-		return error;
-	}
-
-	processor_cpu_load_info_data_t* cpuLoadInfo =
-		(processor_cpu_load_info_data_t*) ia;
-
-	unsigned int all[4];
-	// cpu_no,user,system,idle,nice
-	for (int cpu=0; cpu<cpuCount; cpu++){
-	  printf("%d,", cpu);
-	  for (int i=0; i<4; i++){
-		printf("%d", cpuLoadInfo[cpu].cpu_ticks[i]);
-		all[i] = all[i] + cpuLoadInfo[cpu].cpu_ticks[i];
-		if (i != 3){
-		  printf(",");
-		}else{
-		  printf("\n");
-		}
-	  }
-	}
-	printf("99,");
-	for (int i=0; i<4; i++){
-	  printf("%d", all[i]);
-	  if (i != 3){
-		printf(",");
-	  }else{
-		printf("\n");
-	  }
-	}
-
-	vm_deallocate(mach_task_self(), (vm_address_t)ia, ic);
-	return error;
-}
-`
