@@ -2,35 +2,42 @@
 
 package load
 
-import (
-	"strconv"
+// #include <sys/types.h>
+// #include <sys/sysctl.h>
+// #include <stdlib.h>
+import "C"
 
-	common "github.com/avalente/gopsutil/common"
+import (
+	"fmt"
+	"unsafe"
 )
 
 func LoadAvg() (*LoadAvgStat, error) {
-	values, err := common.DoSysctrl("vm.loadavg")
-	if err != nil {
-		return nil, err
+	name := C.CString("vm.loadavg")
+	defer C.free(unsafe.Pointer(name))
+
+	var size C.size_t
+	var res C.int = C.sysctlbyname(name, nil, &size, nil, 0)
+
+	if res != 0 {
+		return nil, fmt.Errorf("errno %d", res)
 	}
 
-	load1, err := strconv.ParseFloat(values[0], 64)
-	if err != nil {
-		return nil, err
+	buf := make([]byte, int(size))
+
+	res = C.sysctlbyname(name, (unsafe.Pointer(&buf[0])), &size, nil, 0)
+	if res != 0 {
+		return nil, fmt.Errorf("errno %d", res)
 	}
-	load5, err := strconv.ParseFloat(values[1], 64)
-	if err != nil {
-		return nil, err
-	}
-	load15, err := strconv.ParseFloat(values[2], 64)
-	if err != nil {
-		return nil, err
-	}
+
+	var out C.struct_loadavg = *(*C.struct_loadavg)(unsafe.Pointer(&buf[0]))
+
+	scale := float64(out.fscale)
 
 	ret := &LoadAvgStat{
-		Load1:  float64(load1),
-		Load5:  float64(load5),
-		Load15: float64(load15),
+		Load1:  float64(out.ldavg[0]) / scale,
+		Load5:  float64(out.ldavg[1]) / scale,
+		Load15: float64(out.ldavg[2]) / scale,
 	}
 
 	return ret, nil
